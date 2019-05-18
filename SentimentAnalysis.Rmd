@@ -1,0 +1,353 @@
+---
+title: "SentimentAnalysis"
+author: "Gergo Szekely (109012)"
+date: "5/2/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rvest)
+library(tidytext)
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(wordcloud)
+library(stopwords)
+library(data.table)
+
+# install.packages("aws.comprehend", repos = c(cloudyr = "http://cloudyr.github.io/drat", getOption("repos")))
+library(aws.comprehend)
+```
+
+# High-level functions
+
+## Get a book
+```{r}
+get_book <- function(url) {
+  # download raw book
+  book <- read_html(url) %>% 
+    html_nodes("table") %>%
+    html_table()
+  book <- book[[1]]
+  
+  # rename columns to languages
+  names(book) <- unlist(book[1,])
+  
+  # remove meta info rows
+  book <- book[-c(1,2,3,4),]
+  
+  # add paragraphs and chapters
+  book <- book %>%
+    mutate(chapter = cumsum(str_detect(English, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+  
+  book <- book[!grepl("^chapter [\\divxlc]", book$English, ignore.case = TRUE),] %>%
+    mutate(paragraph = row_number()) %>%
+    as_tibble()
+  
+  book
+}
+```
+
+```{r}
+get_book_language <- function(book, language) {
+  book %>%
+    select(c(language, paragraph, chapter))
+}
+
+get_words <- function(book, language) {
+  get_book_language(book, language) %>%
+    ungroup() %>%
+    unnest_tokens_("word", language)
+}
+```
+
+# Alice in Wonderland
+
+```{r}
+url <- "http://www.farkastranslations.com/books/Carroll_Lewis-Alice_in_wonderland-en-hu-es-it-pt-fr-de-eo-fi.html"
+alice <- get_book(url)
+
+alice_by_chapter <- alice %>%
+  select(-c(paragraph))
+
+analyze_alice <- function(df, token) {
+  df %>%
+  group_by(chapter) %>%
+  summarise_all(list(tokens <- function(var) {
+  a <- data.table(text=var) %>%
+    unnest_tokens(token, text, token=token) %>%
+      count()
+  a$n
+  })) %>% gather(key="language", value=token, -chapter)
+}
+```
+
+## Words by language
+
+```{r include=FALSE}
+alice_word_counts <- analyze_alice(alice_by_chapter, "words")
+```
+
+```{r}
+ggplot(data=alice_word_counts, aes(x=chapter, y=token, color=language)) +
+  geom_line() +
+  theme_minimal()
+```
+
+## Characters by language
+
+```{r}
+alice_char_counts <- analyze_alice(alice_by_chapter, "characters")
+
+ggplot(data=alice_char_counts, aes(x=chapter, y=token, color=language)) +
+  geom_line() +
+  theme_minimal()
+```
+
+## Sentiment for English by chapter
+
+### With stop words
+
+```{r include=FALSE}
+scores <- get_words(alice, "English") %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(chapter) %>%
+  summarise(afinn_sentiment = sum(score),
+            afinn_positive=sum(score[score>0]),
+            afinn_negative=sum(score[score<0])) %>% 
+  mutate(method = "AFINN")
+```
+
+```{r}
+visualize_scores <- function(scores) {
+  bind_rows(scores %>%
+              select(s=afinn_sentiment, chapter) %>%
+              mutate(type="sentiment"),
+            scores %>%
+              select(s=afinn_positive, chapter) %>%
+              mutate(type="positives"),
+            scores %>%
+              select(s=afinn_negative, chapter) %>%
+              mutate(type="negatives"),) %>%
+    ggplot(aes(chapter, s, fill = type)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~type, ncol = 1) +
+    theme_minimal() +
+    scale_x_continuous(breaks= pretty_breaks())
+}
+visualize_scores(scores)
+```
+
+
+```{r}
+scores_all <- get_words(alice, "English") %>%
+  count(word, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarize(contribution = sum(n * score))
+
+scores_all %>%
+  top_n(12, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution)) +
+  geom_col() +
+  coord_flip() +
+  labs(y = "Frequency of word * AFINN score")
+```
+
+### No stop words
+
+```{r include=FALSE}
+scores_no_stop <- get_words(alice, "English") %>%
+  anti_join(stop_words, by = "word") %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(chapter) %>%
+  summarise(afinn_sentiment = sum(score),
+            afinn_positive=sum(score[score>0]),
+            afinn_negative=sum(score[score<0])) %>% 
+  mutate(method = "AFINN")
+
+visualize_scores(scores_no_stop)
+```
+
+```{r}
+scores_all_no_stop <- get_words(alice, "English") %>%
+  anti_join(stop_words, by = "word") %>%
+  count(word, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarize(contribution = sum(n * score))
+
+scores_all_no_stop %>%
+  top_n(12, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution)) +
+  geom_col() +
+  coord_flip() +
+  labs(y = "Frequency of word * AFINN score")
+```
+
+```{r}
+scores_all %>%
+  anti_join(scores_all_no_stop, by = "word") %>%
+  top_n(15, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution)) +
+  geom_col() +
+  coord_flip() +
+  labs(y = "Frequency of word * AFINN score")
+```
+
+## Word clouds
+
+```{r}
+lang <- data.table(language=c("English","Hungarian","Spanish","Italian","Portuguese","French","German","Esperanto","Finnish"),
+                   lang_code=c("en", "hu", "es", "it", "pt", "fr", "de", "eo", "fi"))
+
+
+print_word_cloud <- function(code) {
+  lan <- lang[lang_code == code,language]
+  stopword_list <- data.frame(word = stopwords::stopwords(code), stringsAsFactors = FALSE)
+  get_words(alice, lan) %>%
+    anti_join(stopword_list, by = "word") %>%
+    count(word) %>%
+    with(wordcloud(word, n, max.words = 80))
+}
+```
+
+```{r}
+print_word_cloud("en")
+```
+
+```{r}
+print_word_cloud("hu")
+```
+
+```{r}
+print_word_cloud("es")
+```
+
+```{r}
+print_word_cloud("de")
+```
+
+## Amazon Comprehend
+
+```{r}
+# Sentiment analysis - Setup Your Key
+keyTable <- read.csv("accessKeys.csv", header = T)
+AWS_ACCESS_KEY_ID <- as.character(keyTable$Access.key.ID)
+AWS_SECRET_ACCESS_KEY <- as.character(keyTable$Secret.access.key)
+
+Sys.setenv("AWS_ACCESS_KEY_ID" = AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION" = "us-west-2")
+```
+
+```{r}
+# function to get the sentiments of a text
+aws_sentiment <- function(text, lang_code) {
+  aws_sentiment_char_limit <- 5000
+  batch_count <- floor(nchar(text)/aws_sentiment_char_limit)+1
+  result <- as.data.frame(NULL)
+  for (i in 1:batch_count) {
+    current_batch <- substr(text,aws_sentiment_char_limit*(i-1)+1,aws_sentiment_char_limit*i)
+    df <- detect_sentiment(current_batch, language = lang_code)
+    df$chars = nchar(current_batch)
+    result <- rbind(result, df)
+  }
+  result <- data.table(result)
+  result %>%
+    mutate(positive=Positive %*% chars,
+           negative=Negative %*% chars,
+           neutral=Neutral %*% chars) %>%
+    select(c(positive,negative,neutral)) %>%
+    head(1)
+}
+```
+
+## English
+
+```{r}
+aws_analyze <- function(book, language, lang_code) {
+  aws_words <- book %>%
+    group_by(chapter) %>%
+    summarise(text = str_c(word, collapse = " "))
+  
+  res <- as.data.frame(NULL)
+  aws_chapter_count <- dim(aws_words)[1]
+  
+  for (i in 1:aws_chapter_count) {
+    current_chapter <- aws_words %>%
+      filter(chapter == i) %>%
+      select("text") %>%
+      as.character()
+    df <- aws_sentiment(current_chapter, lang_code)
+    res <-  rbind(res, df)
+  }
+  res <- data.table(res)
+  res
+}
+```
+
+```{r}
+aws_en <- aws_analyze(get_words(alice, "English"), "English", "en")
+aws_en$chapter <- seq.int(nrow(aws_en))
+
+aws_en %>% 
+  gather(key="sentiment", value=score, -chapter) %>%
+  ggplot(data=aws_en_tidy, aes(x=chapter, y=score, color=sentiment)) +
+  geom_line() +
+  theme_minimal()
+```
+
+```{r}
+# aws_es <- aws_analyze(get_words(alice, "Spanish"), "Spanish", "es")
+eng <- alice %>%
+    select(c(language, chapter)) %>%
+    ungroup() %>%
+    unnest_tokens_("word", language) %>%
+  anti_join(stop_words, by = "word")
+
+aws_en_stop <- aws_analyze(eng, "English", "en")
+aws_en_stop$chapter <- seq.int(nrow(aws_en_stop))
+
+aws_en_stop %>% 
+  gather(key="sentiment", value=score, -chapter) %>%
+  ggplot(aes(x=chapter, y=score, color=sentiment)) +
+  geom_line() +
+  theme_minimal()
+```
+
+```{r}
+aws_en_stop %>% 
+  select(-c(neutral)) %>%
+  gather(key="sentiment", value=score, -chapter) %>%
+  ggplot(aes(x=chapter, y=score, color=sentiment)) +
+  geom_line() +
+  theme_minimal()
+```
+
+
+```{r}
+f_m <- max(austen_french_aws$aws_positive, austen_french_aws$aws_negative)
+norm_f <- austen_french_aws %>% mutate(aws_positive_f=aws_positive/f_m,
+                                  aws_negative_f=aws_negative/f_m)
+
+e_m <- max(austen_english_aws$aws_positive, austen_english_aws$aws_negative)
+norm_e <- austen_english_aws %>% mutate(aws_positive_e=aws_positive/e_m,
+                                  aws_negative_e=aws_negative/e_m)
+# TODO ggplot scatter plot english vs french
+# TODO normalize raw
+# TODO plot english vs english aws
+# Check other aws functions
+# Correlate scores by chapter and paragraph
+
+
+```
+
+# Conclusions
