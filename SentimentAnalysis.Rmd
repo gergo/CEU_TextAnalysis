@@ -1,7 +1,7 @@
 ---
 title: "SentimentAnalysis"
 author: "Gergo Szekely (109012)"
-date: "5/2/2019"
+date: "2019.05.18"
 output: html_document
 ---
 
@@ -23,10 +23,13 @@ library(data.table)
 library(aws.comprehend)
 ```
 
-# High-level functions
+# Introduction
 
-## Get a book
-```{r}
+I want to do comparative sentiment analysis of base R and AWS Comprehend. I am sure AWS does a lot more in the background than what I will do in base R but the general trends should be similar when I compare chapters of a book.
+
+I found a great website (created by a Hungarian interpreter) where multiple books from the public domain are available in multiple languages in a very user- and machine-friendly way: http://www.farkastranslations.com/. I picked Alice in Wonderland to do in-depth analysis.
+
+```{r include=FALSE}
 get_book <- function(url) {
   # download raw book
   book <- read_html(url) %>% 
@@ -52,12 +55,14 @@ get_book <- function(url) {
 }
 ```
 
-```{r}
+```{r include=FALSE}
+# extract a single language version from a book
 get_book_language <- function(book, language) {
   book %>%
     select(c(language, paragraph, chapter))
 }
 
+# unnest tokens as words
 get_words <- function(book, language) {
   get_book_language(book, language) %>%
     ungroup() %>%
@@ -65,16 +70,24 @@ get_words <- function(book, language) {
 }
 ```
 
-# Alice in Wonderland
+# Language comparison
+
+Alice in Wonderland is available in 9 languages. Let's see how verbose each of these are.
 
 ```{r}
-url <- "http://www.farkastranslations.com/books/Carroll_Lewis-Alice_in_wonderland-en-hu-es-it-pt-fr-de-eo-fi.html"
-alice <- get_book(url)
+alice_url <- "http://www.farkastranslations.com/books/Carroll_Lewis-Alice_in_wonderland-en-hu-es-it-pt-fr-de-eo-fi.html"
+```
+
+```{r include=FALSE}
+alice <- get_book(alice_url)
 
 alice_by_chapter <- alice %>%
   select(-c(paragraph))
+```
 
-analyze_alice <- function(df, token) {
+```{r}
+# function to count tokens
+token_count <- function(df, token) {
   df %>%
   group_by(chapter) %>%
   summarise_all(list(tokens <- function(var) {
@@ -86,34 +99,44 @@ analyze_alice <- function(df, token) {
 }
 ```
 
-## Words by language
+## By words
+
+I created a function to count tokens in the book data frame for each language.
 
 ```{r include=FALSE}
-alice_word_counts <- analyze_alice(alice_by_chapter, "words")
+alice_word_counts <- token_count(alice_by_chapter, "words")
 ```
+
+Hungarian and Finnish can express the same literary content with the least words. My guess it that these 2 languages are agglutinating languages so nouns and verbs can have thousands of endings depending on the tense and other contextual properties. These are single words but in Indo-European languages would be multiple words.
 
 ```{r}
 ggplot(data=alice_word_counts, aes(x=chapter, y=token, color=language)) +
   geom_line() +
-  theme_minimal()
+  theme_minimal() +
+  ggtitle("Word count by chapter")
 ```
 
-## Characters by language
+## By Characters
+
+Word count has much higher variation than character count. Hungarian is still among the least verbose languages in this metric but Finnish seems to have longer words. Italian also uses fewer characters than most other languages.
 
 ```{r}
-alice_char_counts <- analyze_alice(alice_by_chapter, "characters")
+alice_char_counts <- token_count(alice_by_chapter, "characters")
 
 ggplot(data=alice_char_counts, aes(x=chapter, y=token, color=language)) +
   geom_line() +
-  theme_minimal()
+  theme_minimal() +
+  ggtitle("Character count by chapter")
 ```
 
-## Sentiment for English by chapter
+# Sentiment for English by chapter
 
-### With stop words
+I tried to find sentiment analysis tools for multiple languages but English seems to be the only one well supported.
+
+## With stop words
 
 ```{r include=FALSE}
-scores <- get_words(alice, "English") %>%
+alice_scores <- get_words(alice, "English") %>%
   inner_join(get_sentiments("afinn"), by = "word") %>%
   group_by(chapter) %>%
   summarise(afinn_sentiment = sum(score),
@@ -139,18 +162,26 @@ visualize_scores <- function(scores) {
     theme_minimal() +
     scale_x_continuous(breaks= pretty_breaks())
 }
-visualize_scores(scores)
 ```
 
+Alice in Wonderland seems to be quite neutral, slightly positive using the afinn sentiment dictionary.
 
 ```{r}
-scores_all <- get_words(alice, "English") %>%
+visualize_scores(alice_scores)
+```
+
+```{r include=FALSE}
+alice_scores_all <- get_words(alice, "English") %>%
   count(word, sort = TRUE) %>%
   inner_join(get_sentiments("afinn"), by = "word") %>%
   group_by(word) %>%
   summarize(contribution = sum(n * score))
+```
 
-scores_all %>%
+The largest contributors to sentiment scores in absolute value contain some words that will likely be removed as stop words: eg.: like, no.
+
+```{r}
+alice_scores_all %>%
   top_n(12, abs(contribution)) %>%
   mutate(word = reorder(word, contribution)) %>%
   ggplot(aes(word, contribution)) +
@@ -159,10 +190,12 @@ scores_all %>%
   labs(y = "Frequency of word * AFINN score")
 ```
 
-### No stop words
+## No stop words
+
+Let's see the same charts but this time without stop words. This time almost all chapters come out as negative with the exception of the first one, which is neutral.
 
 ```{r include=FALSE}
-scores_no_stop <- get_words(alice, "English") %>%
+alice_scores_no_stop <- get_words(alice, "English") %>%
   anti_join(stop_words, by = "word") %>%
   inner_join(get_sentiments("afinn"), by = "word") %>%
   group_by(chapter) %>%
@@ -170,19 +203,23 @@ scores_no_stop <- get_words(alice, "English") %>%
             afinn_positive=sum(score[score>0]),
             afinn_negative=sum(score[score<0])) %>% 
   mutate(method = "AFINN")
-
-visualize_scores(scores_no_stop)
 ```
 
 ```{r}
-scores_all_no_stop <- get_words(alice, "English") %>%
+visualize_scores(alice_scores_no_stop)
+```
+
+Let's see what words contribute the most to these negative scores.
+
+```{r}
+alice_scores_all_no_stop <- get_words(alice, "English") %>%
   anti_join(stop_words, by = "word") %>%
   count(word, sort = TRUE) %>%
   inner_join(get_sentiments("afinn"), by = "word") %>%
   group_by(word) %>%
   summarize(contribution = sum(n * score))
 
-scores_all_no_stop %>%
+alice_scores_all_no_stop %>%
   top_n(12, abs(contribution)) %>%
   mutate(word = reorder(word, contribution)) %>%
   ggplot(aes(word, contribution)) +
@@ -191,9 +228,11 @@ scores_all_no_stop %>%
   labs(y = "Frequency of word * AFINN score")
 ```
 
+Let's see what the biggest contributors are that were removed as stop words.
+
 ```{r}
-scores_all %>%
-  anti_join(scores_all_no_stop, by = "word") %>%
+alice_scores_all %>%
+  anti_join(alice_scores_all_no_stop, by = "word") %>%
   top_n(15, abs(contribution)) %>%
   mutate(word = reorder(word, contribution)) %>%
   ggplot(aes(word, contribution)) +
@@ -202,17 +241,18 @@ scores_all %>%
   labs(y = "Frequency of word * AFINN score")
 ```
 
-## Word clouds
+# Word clouds
 
-```{r}
+I understand word clouds are not particularly useful but I still like them. I created a simple function to draw word clouds. It removes stop words using the stopwords package. These are unfortunately not available for all languages (eg.: Esperanto).
+
+```{r include=FALSE}
 lang <- data.table(language=c("English","Hungarian","Spanish","Italian","Portuguese","French","German","Esperanto","Finnish"),
                    lang_code=c("en", "hu", "es", "it", "pt", "fr", "de", "eo", "fi"))
 
-
-print_word_cloud <- function(code) {
+print_word_cloud <- function(book, code) {
   lan <- lang[lang_code == code,language]
   stopword_list <- data.frame(word = stopwords::stopwords(code), stringsAsFactors = FALSE)
-  get_words(alice, lan) %>%
+  get_words(book, lan) %>%
     anti_join(stopword_list, by = "word") %>%
     count(word) %>%
     with(wordcloud(word, n, max.words = 80))
@@ -220,24 +260,22 @@ print_word_cloud <- function(code) {
 ```
 
 ```{r}
-print_word_cloud("en")
+print_word_cloud(alice, "en")
 ```
 
 ```{r}
-print_word_cloud("hu")
+print_word_cloud(alice, "hu")
 ```
 
 ```{r}
-print_word_cloud("es")
+print_word_cloud(alice, "es")
 ```
 
-```{r}
-print_word_cloud("de")
-```
+# Amazon Comprehend
 
-## Amazon Comprehend
+AWS requires some environment variable to be set. These are stored in accessKeys.csv - to run this piece of code you have to place it along the R file.  Make sure this is kept private otherwise you might end up with pricey bill from Amazon. Some people are happy to set up EC2 instances to mine cryptocurrencies using your credentials.
 
-```{r}
+```{r include=FALSE}
 # Sentiment analysis - Setup Your Key
 keyTable <- read.csv("accessKeys.csv", header = T)
 AWS_ACCESS_KEY_ID <- as.character(keyTable$Access.key.ID)
@@ -248,7 +286,11 @@ Sys.setenv("AWS_ACCESS_KEY_ID" = AWS_ACCESS_KEY_ID,
            "AWS_DEFAULT_REGION" = "us-west-2")
 ```
 
-```{r}
+I ran into some difficulties using the `aws.comprehend` package. The AWS API has a 5000 character limit per batch so I had to do a trick to overcome that limitation as most of the chapters are longer than that. I could have done analysis per sentence or paragraph but I might have run into another limit of free requests per account.
+
+I created a function to split the input text up to chunks of 5000 characters and send those to AWS. The results are aggregated using a weighted sum by the character count. The method could be a bit more sophisticated by taking into account sentence or at least word endings around the 5000 char mark.
+
+```{r include=FALSE}
 # function to get the sentiments of a text
 aws_sentiment <- function(text, lang_code) {
   aws_sentiment_char_limit <- 5000
@@ -270,9 +312,7 @@ aws_sentiment <- function(text, lang_code) {
 }
 ```
 
-## English
-
-```{r}
+```{r include=FALSE}
 aws_analyze <- function(book, language, lang_code) {
   aws_words <- book %>%
     group_by(chapter) %>%
@@ -294,26 +334,61 @@ aws_analyze <- function(book, language, lang_code) {
 }
 ```
 
+## English
+
+AWS gives back 3 scores: positive, negative and neutral scores for the provided text chunk.
+
 ```{r}
 aws_en <- aws_analyze(get_words(alice, "English"), "English", "en")
 aws_en$chapter <- seq.int(nrow(aws_en))
 
 aws_en %>% 
   gather(key="sentiment", value=score, -chapter) %>%
-  ggplot(data=aws_en_tidy, aes(x=chapter, y=score, color=sentiment)) +
+  ggplot(aes(x=chapter, y=score, color=sentiment)) +
   geom_line() +
-  theme_minimal()
+  theme_minimal() +
+  scale_x_continuous(breaks= pretty_breaks())
 ```
 
-```{r}
-# aws_es <- aws_analyze(get_words(alice, "Spanish"), "Spanish", "es")
-eng <- alice %>%
-    select(c(language, chapter)) %>%
-    ungroup() %>%
-    unnest_tokens_("word", language) %>%
-  anti_join(stop_words, by = "word")
+Based on this the book is rather negative especially around the middle.
 
-aws_en_stop <- aws_analyze(eng, "English", "en")
+```{r}
+bind_rows(aws_en %>%
+              select(s=neutral, chapter) %>%
+              mutate(type="neutral"),
+            aws_en %>%
+              select(s=positive, chapter) %>%
+              mutate(type="positive"),
+            aws_en %>%
+              select(s=negative, chapter) %>%
+              mutate(type="negative"),) %>%
+  ggplot(aes(chapter, s, fill = type)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~type, ncol = 1) +
+  theme_minimal() +
+  scale_x_continuous(breaks= pretty_breaks())
+```
+
+## Other Languages
+
+I tried other languages but the R api does not seem to support it. I am not sure if this is a bug in `aws.comprehend` or a limitation in AWS itself but the same code that works with English fails with Spanish and German - both of which should be supported.
+
+```{r include=FALSE}
+# aws_es <- aws_analyze(get_words(alice, "Spanish"), "Spanish", "es")
+```
+
+## Stop words
+
+When I removed stop words I did the same analysis and seemingly AWS didn't know what to make out of this. The text is categorized as neutral by great confidence.
+
+```{r}
+alice_eng_no_stops <- alice %>%
+    select(c(English, chapter)) %>%
+    ungroup() %>%
+    unnest_tokens("word", English) %>%
+    anti_join(stop_words, by = "word")
+
+aws_en_stop <- aws_analyze(alice_eng_no_stops, "English", "en")
 aws_en_stop$chapter <- seq.int(nrow(aws_en_stop))
 
 aws_en_stop %>% 
@@ -322,6 +397,8 @@ aws_en_stop %>%
   geom_line() +
   theme_minimal()
 ```
+
+There are some values returned for positive and negative sentiments too but they are a magnitude smaller than that is for neutral.
 
 ```{r}
 aws_en_stop %>% 
@@ -332,22 +409,6 @@ aws_en_stop %>%
   theme_minimal()
 ```
 
-
-```{r}
-f_m <- max(austen_french_aws$aws_positive, austen_french_aws$aws_negative)
-norm_f <- austen_french_aws %>% mutate(aws_positive_f=aws_positive/f_m,
-                                  aws_negative_f=aws_negative/f_m)
-
-e_m <- max(austen_english_aws$aws_positive, austen_english_aws$aws_negative)
-norm_e <- austen_english_aws %>% mutate(aws_positive_e=aws_positive/e_m,
-                                  aws_negative_e=aws_negative/e_m)
-# TODO ggplot scatter plot english vs french
-# TODO normalize raw
-# TODO plot english vs english aws
-# Check other aws functions
-# Correlate scores by chapter and paragraph
-
-
-```
-
 # Conclusions
+
+Sentiment analysis is not very well supported for languages other than English using AWS Comprehend via R. Other methods are also much more difficult because sentiment lexicons are not as readily available as for English.
